@@ -18,6 +18,12 @@ db_database_name    = conf.get('database','database')
 db_table_prefix     = conf.get('database', 'table_prefix')
 db_config = {'host' : db_host, 'port' : db_port, 'user' : db_user, 'password' : db_password, 'db' : db_database_name, 'prefix' : db_table_prefix}
 
+other_config = {
+    'readOnePictureTime': eval(conf.get('other', 'readOnePictureTime')),
+    'oneMinuteReadChars': eval(conf.get('other',  'oneMinuteReadChars')),
+    'readTimeWeight'    : eval(conf.get('other',  'readTimeWeight'))
+}
+
 print("Connecting database...")
 db = pymysql.connect(host = db_config['host'],port = db_config['port'], user = db_config['user'], password  = db_config['password'], db = db_config['db'], charset = 'utf8mb4')
 cursor = db.cursor()
@@ -43,11 +49,38 @@ for i in range(0, len(posts)):
     index2id[str(i)] = posts[i][0]
     post_ids.append(posts[i][0])
     post_contents.append(posts[i][1])
-print("文章总数：" + str(len(post_contents)))
+numberOfAllPosts = len(post_contents)
+print("文章总数：" + str(numberOfAllPosts))
 
+from bs4 import BeautifulSoup
+getPostPredictReadTimeFromId = {}
+def posts2time():
+    for i in range(0, len(post_contents)):
+        # print(post_contents[i])
+        soup = BeautifulSoup(post_contents[i])
+        numberOfImgTags = len(soup.find_all("img"))
+        # print(numberOfImgTags)
+
+        # 浩渺为单位
+        readThePostTime = numberOfImgTags * other_config['readOnePictureTime'] * 1000
+
+        pContent2 = soup.get_text().strip()
+        pContent  = ""
+        for c in pContent2:
+            # 得到汉字
+            if '\u4e00' <= c <= '\u9fa5':
+                pContent += c
+
+        # print(pContent)
+
+        readThePostTime += (60 * 1000 * len(pContent) / other_config['oneMinuteReadChars'])
+
+        getPostPredictReadTimeFromId[str(index2id[str(i)])] = readThePostTime
+        #print(readThePostTime)
+posts2time()
+print("成功获取所有文章的预计阅读时间")
 from jieba import posseg as pseg
 jieba.load_userdict('data/jiebaAstroDicts.txt')
-
 
 # 过滤关键词列表的函数
 def tagsFilter(tags):
@@ -97,7 +130,7 @@ for i in range(0, len(posts_words)):
     posts_vecs.append(dictionary.doc2bow(posts_words[i]))
 print("size of postsVecs: " + str(len(posts_vecs)))
 
-sql_query_users = "select user_id from " + db_config['prefix'] + "_usermeta where meta_key='_perci_haku_viewed'";
+sql_query_users = "select userid from " + "perci_haku_readhistory";
 cursor.execute(sql_query_users)
 users3 = cursor.fetchall()
 users2 = []
@@ -113,20 +146,22 @@ print("用户总数 :" + str(len(userids)));
 print(userids)
 for i in range(0, len(userids)):
     print("开始处理id为" + str(userids[i]) + "的用户......")
-    sql_query_history = "select * from " + db_config['prefix']  + "_usermeta where meta_key='_perci_haku_viewed' and user_id='" + str(userids[i]) + "'"
+    sql_query_history = "select * from " + "perci_haku_readhistory"  + " where userid='" + str(userids[i]) + "'"
     cursor.execute(sql_query_history)
     history = cursor.fetchall()
-    try:
-        history = history[0][3]
-    except:
-        print("得到阅读历史失败!")
-        break
 
-    postids = history.split('|')
+    print(history)
+
+    postids = []
+    getPostReadTimeFromId = {}
+    for k in range(0, len(history)):
+        postids.append(history[k][2])
+        getPostReadTimeFromId[str(history[k][2])] = history[k][4]
 
     selectedIds = []
     postIndexes = []
     print(postids)
+    # 选最多二十篇近期游览的文章
     for k in range(len(postids)-1, -1, -1):
         # 已经有了20个则退出
         if len(postIndexes) >= 20:
@@ -138,11 +173,12 @@ for i in range(0, len(userids)):
             except:
                 continue
             try:
-                postIndexes.append(id2index[postids[k]])
+                postIndexes.append(id2index[str(postids[k])])
             except:
                 pass
 
-
+    # print("postIndexes:")
+    print(postIndexes)
     allRes = []
     for k in range(0, len(postIndexes)):
         sims = index[lsi[posts_vecs[k]]]
@@ -153,21 +189,33 @@ for i in range(0, len(userids)):
         for l in range(len(res)-2, len(res)-4, -1):
             if l < 0:
                 break
-            allRes.append(res[l])
+            nowPostIndex = postIndexes[k]
+            nowPostId    = index2id[str(nowPostIndex)]
+            finalL = res[l][1] * (1 - other_config['readTimeWeight']) + res[l][1] * other_config['readTimeWeight'] * getPostReadTimeFromId[str(nowPostId)] / getPostPredictReadTimeFromId[str(nowPostId)] ;
+
+            # print("L=" + str(res[l][1]))
+            # print(" finalL=" + str(finalL))
+            allRes.append([res[l][0], finalL])
 
     allRes = sorted(allRes, key=lambda  x: x[1])
     allRes = list(reversed(allRes))
 
+    print(allRes)
     post_recoIds = []
     for k in range(0, len(allRes)):
         if len(post_recoIds) >= 10:
             break
         post_recoIds.append(index2id[str(allRes[k][0])])
+
+
+    #print(post_recodIds)
+    #print(post_recoIds)
     #print(post_recoIds)
     #print(postids)
     #print(selectedIds)
     #print(postIndexes)
     #print(userids[i])
+
 
     # 保存
     userid = userids[i]
@@ -201,6 +249,8 @@ for i in range(0, len(userids)):
         print(str(e))
         db.rollback()
         print("     写入推荐文章id失败!")
+        
+    
 print("全部完成!")
 
 
